@@ -7,6 +7,7 @@
   window.__QC_ROI_MONITOR_LOADED__ = true;
 
   const STORAGE_KEY = "qc_roi_monitor_config_v1";
+  const CONFIG_BACKUP_KEY = "qc_roi_monitor_config_backup_v1";
   const CHANNELS_STORAGE_KEY = "qc_roi_monitor_channels_v1";
   const CHANNELS_BACKUP_KEY = "qc_roi_monitor_channels_backup_v1";
   const COOLDOWN_STORAGE_KEY = "qc_roi_monitor_cooldowns_v1";
@@ -931,12 +932,31 @@
       font-size: 10.5px; color: #94a3b8; line-height: 1.5;
     }
     .quick-view-notes strong { color: #cbd5e1; }
+    .icon-btn.has-update {
+      position: relative;
+      color: #fef08a !important;
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.28), rgba(234, 88, 12, 0.34)) !important;
+      border-color: rgba(251, 191, 36, 0.85) !important;
+      box-shadow: 0 0 12px rgba(245, 158, 11, 0.55);
+      font-weight: 700;
+    }
+    .icon-btn.has-update::after {
+      content: "";
+      position: absolute;
+      top: -3px;
+      right: -3px;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+    }
   `;
   shadow.appendChild(style);
 
   const root = document.createElement("div");
   root.innerHTML = `
-    <div class="pill" id="pillBtn" title="点击展开 Kamisama - 全链路千川 监控面板">
+    <div class="pill" id="pillBtn" title="点击展开面板 · 按住可拖动悬浮位置" style="cursor:grab;">
       <span class="dot" id="pillDot"></span>
       <span id="pillText">Kamisama: 未启动</span>
     </div>
@@ -946,7 +966,7 @@
         <div class="title">
           <span class="dot" id="headerDot"></span>
           <span>Kamisama - 全链路千川</span>
-          <span class="version-tag">v1.3.3</span>
+          <span class="version-tag">v1.3.4</span>
         </div>
         <div class="header-actions">
           <button class="icon-btn" id="checkUpdateBtn" type="button" title="检查官网 kamisama.si 是否有新版本可更新">更新</button>
@@ -960,8 +980,9 @@
       <div class="body">
         <div class="update-banner" id="updateBanner">
           <span id="updateBannerText">正在检查最新版本...</span>
-          <div style="display:flex;align-items:center;gap:6px;">
+          <div style="display:flex;align-items:center;gap:6px;flex-shrink:0;">
             <a class="btn btn-primary btn-sm" id="updateDownloadLink" href="https://www.kamisama.si" target="_blank" rel="noopener noreferrer" style="text-decoration:none;">下载新版</a>
+            <button class="icon-btn" id="ignoreUpdateBtn" type="button" style="display:none;" title="忽略此版本提醒，直到下次发布更新版本">忽略此版</button>
             <button class="icon-btn" id="closeUpdateBannerBtn" type="button">关闭</button>
           </div>
         </div>
@@ -3792,42 +3813,81 @@
         ? `📊 Kamisama ${sceneName}总结（${hhmm}）`
         : `📊 Kamisama ${sceneName} ${intervalMin}分钟总结（${hhmm}）`;
 
-      // 生成高可读的内置千川趋势规则报告
+      // 深度诊断增强指标：消耗流速(¥/h)、头部3条集中度、隐形失血计划（全天达标但近30分ROI骤降>=0.25）
+      const burnRatePerHour =
+        costDiff !== null && elapsedMin >= 2 && costDiff > 0
+          ? Math.round((costDiff / elapsedMin) * 60)
+          : null;
+      const spendSortedRows = rows
+        .filter((r) => r.cost !== null && r.cost > 0)
+        .sort((a, b) => (b.cost || 0) - (a.cost || 0));
+      const top3CostSum = spendSortedRows.slice(0, 3).reduce((s, r) => s + (r.cost || 0), 0);
+      const top3CostSharePct =
+        effectiveCost && effectiveCost > 0 ? Math.round((top3CostSum / effectiveCost) * 100) : null;
+      const silentBleedPlans = [];
+      if (oldestSample && oldestSample.planMap && elapsedMin >= 2) {
+        validRoiRows.forEach((r) => {
+          const oldP = oldestSample.planMap[r.id];
+          if (!oldP || oldP.roi === null || oldP.roi === undefined) return;
+          const drop = r.roi - oldP.roi;
+          if (r.roi >= lowerNum && drop <= -0.25 && (r.cost === null || r.cost >= Number(config.minCost || 0))) {
+            silentBleedPlans.push({
+              name: r.name.slice(0, 20),
+              oldRoi: oldP.roi,
+              curRoi: r.roi,
+              drop: Number(drop.toFixed(2)),
+              cost: r.cost,
+            });
+          }
+        });
+        silentBleedPlans.sort((a, b) => a.drop - b.drop);
+      }
+      const curBalance = healthState.lastBalanceValue ?? null;
+      const balanceHoursLeft =
+        curBalance !== null && burnRatePerHour && burnRatePerHour > 50
+          ? Number((curBalance / burnRatePerHour).toFixed(1))
+          : null;
+
+      // 生成极简短行、一眼看懂的内置规则报告
       const ruleLines = [];
       const costBurnStr =
-        costDiff !== null && elapsedMin >= 2 ? `（近${elapsedMin}分新增 ${formatCostDisplay(Math.max(0, costDiff))}）` : "";
+        costDiff !== null && elapsedMin >= 2 ? `（近${elapsedMin}分+${formatCostDisplay(Math.max(0, costDiff))}）` : "";
       ruleLines.push(
-        `1. 【大盘走势与预判】`,
-        `   ${displayRoiLabel}：${displayRoi ?? "--"} · ${trendWord}`,
-        `   ${isLiveControlScene ? "调控总消耗" : overallCostLabel}：${formatCostDisplay(effectiveCost)}${costBurnStr} · 活跃 ${rows.length} ${unitWord}`
+        `📊 大盘体检`,
+        `• ${displayRoiLabel}：${displayRoi ?? "--"}｜${trendWord}`,
+        `• ${isLiveControlScene ? "调控消耗" : overallCostLabel}：${formatCostDisplay(effectiveCost)}${costBurnStr}｜活跃 ${rows.length} ${unitWord}`
       );
-      if (isLiveControlScene && totalRowBudget > 0) {
-        const pct = ((totalRowCost / totalRowBudget) * 100).toFixed(1);
-        ruleLines.push(`   调控总预算进度：已烧 ${pct}%（剩 ${formatCostDisplay(Math.max(0, totalRowBudget - totalRowCost))}）`);
+      if (curBalance !== null) {
+        ruleLines.push(
+          `• 可用余额：${formatCostDisplay(curBalance)}${balanceHoursLeft !== null ? `（按当前流速约撑 ${balanceHoursLeft}h）` : ""}`
+        );
       }
-      ruleLines.push(`   预判：${forecastWord}`);
+      if (top3CostSharePct !== null && top3CostSharePct >= 55) {
+        ruleLines.push(`• 集中风险：头部 3 条占总消耗 ${top3CostSharePct}%，防单计划波动`);
+      }
+      ruleLines.push(`• 预判：${forecastWord}`);
 
-      ruleLines.push(`\n2. 【优质好计划（放量/加预算候选）】`);
+      ruleLines.push(`\n🔥 放量候选`);
       if (goodPlanPool.length > 0) {
-        goodPlanPool.forEach((p, idx) => {
+        goodPlanPool.forEach((p) => {
           const cleanId = String(p.id || "").replace(/:cost|:expired$/, "");
           const trend = getPlanTrendTag(cleanId, p.roi);
           ruleLines.push(
-            `   ${idx + 1}) 「${p.name.slice(0, 18)}」ROI ${p.roi}${trend}${p.cost !== null ? ` · 耗${formatCostDisplay(p.cost)}` : ""} → 建议保持或小幅加预算放量`
+            `• ${p.name.slice(0, 16)}｜ROI ${p.roi}${trend}${p.cost !== null ? ` · 耗${formatCostDisplay(p.cost)}` : ""} → 小幅加预算`
           );
         });
       } else {
-        ruleLines.push(`   暂无显著高ROI放量计划，建议继续观察或补充新素材测款`);
+        ruleLines.push(`• 暂无显著放量计划，建议观察或补新素材`);
       }
 
-      ruleLines.push(`\n3. 【异常坏计划（止损 / 补预算 / 灰保防跑偏）】`);
+      ruleLines.push(`\n🚨 异常处置`);
       let hasBad = false;
       if (lowItems.length > 0) {
         hasBad = true;
         lowItems.slice(0, 3).forEach((p) => {
           const trend = getPlanTrendTag(p.id, p.roi);
           ruleLines.push(
-            `   🔴 跌破下限「${p.name.slice(0, 16)}」ROI ${p.roi}${trend}（下限${p.threshold}）→ 建议降出价或暂停止损`
+            `• 🔴 ${p.name.slice(0, 15)}｜ROI ${p.roi}${trend}（<${p.threshold}）→ 降出价/暂停`
           );
         });
       }
@@ -3836,25 +3896,37 @@
         costItems.slice(0, 3).forEach((p) => {
           const eta = getBudgetEtaTag(p);
           ruleLines.push(
-            `   ⚡ 预算不足「${p.name.slice(0, 16)}」已烧${Math.round(p.budgetPct || 0)}%（¥${Math.round(p.cost || 0)}/¥${Math.round(p.budget || 0)}${eta}）→ 建议及时加预算`
+            `• ⚡ ${p.name.slice(0, 15)}｜已烧${Math.round(p.budgetPct || 0)}%${eta} → 补预算防断流`
+          );
+        });
+      }
+      if (silentBleedPlans.length > 0) {
+        hasBad = true;
+        silentBleedPlans.slice(0, 2).forEach((p) => {
+          ruleLines.push(
+            `• ⚠️ 隐形下滑 ${p.name.slice(0, 14)}｜ROI ${p.oldRoi}→${p.curRoi} → 提前压出价`
           );
         });
       }
       if (expiredItems.length > 0) {
         hasBad = true;
-        const expNames = expiredItems.slice(0, 3).map((p) => `「${p.name.slice(0, 14)}」`).join("、");
-        ruleLines.push(`   🟡 灰保已过保（${expiredItems.length}条）：${expNames} → 易跑偏跑飞，建议重点盯盘`);
+        const expNames = expiredItems.slice(0, 3).map((p) => p.name.slice(0, 12)).join("、");
+        ruleLines.push(`• 🟡 灰保过保(${expiredItems.length}条)：${expNames} → 重点盯防跑偏`);
       }
       if (!hasBad) {
-        ruleLines.push(`   当前无跌破、预算不足或灰保过保风险，计划运行健康`);
+        ruleLines.push(`• 当前无跌破、撞墙或过保风险，运行健康`);
       }
 
       const actions = [];
-      if (lowItems.length > 0) actions.push(`优先处理 ${lowItems.length} 条跌破下限${isLiveControlScene ? "调控任务" : "计划"}止损`);
-      if (costItems.length > 0) actions.push(`给 ${costItems.length} 条预算不足${isLiveControlScene ? "调控任务" : "计划"}补预算防断流`);
-      if (expiredItems.length > 0) actions.push(`复核 ${expiredItems.length} 条灰保已过保计划防止跑偏`);
-      if (goodPlanPool.length > 0) actions.push(`对 Top ${goodPlanPool.length} 优质计划适当加预算放量`);
-      ruleLines.push(`\n4. 【下个${intervalMin}分钟重点动作】`, `   ${actions.length > 0 ? actions.join("；") : "保持当前出价与预算节奏，继续盯盘"}`);
+      if (lowItems.length > 0) actions.push(`1. P0：止损/降价 ${lowItems.length} 条跌破下限计划`);
+      if (costItems.length > 0) actions.push(`${actions.length + 1}. P0：给 ${costItems.length} 条预算不足计划补预算`);
+      if (silentBleedPlans.length > 0) actions.push(`${actions.length + 1}. P1：排查 ${silentBleedPlans.length} 条近${elapsedMin}分隐形下滑计划`);
+      if (goodPlanPool.length > 0) actions.push(`${actions.length + 1}. P1：对 Top ${goodPlanPool.length} 高ROI计划加预算放量`);
+      if (expiredItems.length > 0) actions.push(`${actions.length + 1}. P2：紧盯 ${expiredItems.length} 条灰保已过保计划`);
+      ruleLines.push(
+        `\n🎯 立刻执行`,
+        ...(actions.length > 0 ? actions : [`1. 保持当前出价与预算节奏，继续盯盘`])
+      );
 
       const ruleReportText = ruleLines.join("\n");
       let finalReportText = ruleReportText;
@@ -3868,13 +3940,18 @@
           engineType: "ai",
           engineLabel: "AI 分析中...",
           metaText: `${timeStr} · 正在调用 AI 生成${sceneName}深度诊断...`,
-          bodyText: "⏳ 正在将当前大盘、近30分钟走势与优劣计划发送给 AI 大模型分析，请稍候...",
+          bodyText: "⏳ 正在将大盘流速、余额、集中度与优劣计划发送给 AI 大模型诊断，请稍候...",
         });
 
         const metricsData = {
           scene: sceneName,
           time: timeStr,
-          thresholds: { roiLower: config.lowerLimit, roiUpper: config.upperLimit, budgetWarnPct: config.budgetWarnPercent },
+          thresholds: {
+            roiLower: config.lowerLimit,
+            roiUpper: config.upperLimit,
+            budgetWarnPct: config.budgetWarnPercent,
+            balanceWarnLine: config.balanceWarnThreshold ?? null,
+          },
           overall: {
             roiLabel: displayRoiLabel,
             roi: displayRoi,
@@ -3882,9 +3959,22 @@
             elapsedMinutes: elapsedMin,
             cost: effectiveCost,
             costDelta: costDiff !== null ? Number(costDiff.toFixed(2)) : null,
+            burnRatePerHour,
+            accountBalance: curBalance,
+            balanceHoursLeft,
+            top3CostSharePct,
             totalBudget: totalRowBudget > 0 ? totalRowBudget : null,
             activeCount: rows.length,
           },
+          topSpendPlans: spendSortedRows.slice(0, 5).map((p) => ({
+            name: p.name.slice(0, 20),
+            cost: p.cost,
+            costSharePct: effectiveCost > 0 ? Math.round(((p.cost || 0) / effectiveCost) * 100) : null,
+            roi: p.roi,
+            budgetPct: p.budget ? Math.round(((p.cost || 0) / p.budget) * 100) : null,
+            trend: getPlanTrendTag(p.id, p.roi).trim(),
+          })),
+          silentBleedPlans: silentBleedPlans.slice(0, 4),
           goodPlans: goodPlanPool.map((p) => ({
             name: p.name.slice(0, 22),
             roi: p.roi,
@@ -4828,41 +4918,44 @@
     return true;
   }
 
-  // 一键切换千川分页「每页显示条数」（支持 10 / 20 / 50 / 100，默认 100，兼容投放页与调控页）
-  function trySetTablePageSize(targetSize = 100, silent = false, onComplete = null) {
+  // 一键切换千川分页「每页显示条数」（支持 10 / 20 / 50 / 100，默认 100，兼容投放页与调控页，支持 SPA 延迟加载重试）
+  function trySetTablePageSize(targetSize = 100, silent = false, onComplete = null, retryLeft = 4) {
     const sizeNum = Number(targetSize) || 100;
     const sizeTextRe = /^(?:每页\s*)?(10|20|30|40|50|100|200)\s*条(?:\/页)?$/;
     const pagContainers = Array.from(
       document.querySelectorAll(
-        "[class*='pagination'], [class*='pager'], .aurora-pagination, .ovui-pagination, .byted-pagination"
+        "[class*='pagination'], [class*='pager'], .aurora-pagination, .ovui-pagination, .byted-pagination, .arco-pagination, .semi-page"
       )
     ).filter((el) => isVisible(el));
 
     let triggerEl = null;
     let currentSize = null;
-    const searchRoots = pagContainers.length > 0 ? pagContainers : [document.body];
+    const searchRoots = pagContainers.length > 0 ? [...pagContainers, document.body] : [document.body];
     for (const rootEl of searchRoots) {
       const candidates = Array.from(
-        rootEl.querySelectorAll("button, [role='combobox'], [role='button'], [class*='select'], span, div")
+        rootEl.querySelectorAll("button, [role='combobox'], [role='button'], [class*='select'], span, div, input")
       ).filter((el) => {
         if (!isVisible(el)) return false;
         const r = el.getBoundingClientRect();
-        if (r.width < 42 || r.width > 220 || r.height < 18 || r.height > 54) return false;
-        const t = normalizeText(el.innerText || el.textContent);
+        if (r.width < 40 || r.width > 240 || r.height < 18 || r.height > 56) return false;
+        const t = normalizeText(el.value || el.innerText || el.textContent);
         return sizeTextRe.test(t);
       });
       if (candidates.length > 0) {
-        // 优先取更贴近触发器的外层 select 容器或最小可点击节点
         candidates.sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
         const picked = candidates[0];
-        const m = normalizeText(picked.innerText || picked.textContent).match(sizeTextRe);
+        const m = normalizeText(picked.value || picked.innerText || picked.textContent).match(sizeTextRe);
         currentSize = m ? Number(m[1]) : null;
-        triggerEl = picked.closest?.("[class*='select'], [role='combobox'], button") || picked;
+        triggerEl = picked.closest?.("[class*='select-view'], [class*='select'], [role='combobox'], button") || picked;
         break;
       }
     }
 
     if (!triggerEl) {
+      if (silent && retryLeft > 0 && config.enabled) {
+        setTimeout(() => trySetTablePageSize(targetSize, silent, onComplete, retryLeft - 1), 1300);
+        return false;
+      }
       if (!silent) showToast("当前页未找到分页条数选择器（可能已展示全部或未滚动到底部）", 3000);
       if (typeof onComplete === "function") setTimeout(() => onComplete(false), 150);
       return false;
@@ -4874,32 +4967,50 @@
       return true;
     }
 
-    triggerEl.click();
-    setTimeout(() => {
-      const optRe = new RegExp(`^(?:每页\\s*)?${sizeNum}\\s*条(?:\\/页)?$`);
+    const dispatchRealClick = (el) => {
+      try {
+        el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+        el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+        el.click();
+      } catch {
+        el.click?.();
+      }
+    };
+
+    dispatchRealClick(triggerEl);
+
+    const optRe = new RegExp(`^(?:每页\\s*)?${sizeNum}\\s*条(?:\\/页)?$`);
+    const findOptionAndClick = (attempt = 0) => {
       const opts = Array.from(
         document.querySelectorAll(
-          "[role='option'], [class*='select-option'], [class*='dropdown-item'], [class*='menu-item'], li"
+          "[role='option'], [class*='select-option'], [class*='dropdown-item'], [class*='menu-item'], [class*='popup'] li, [class*='popover'] li, [class*='popup'] div, [class*='popover'] div, li"
         )
       ).filter((el) => {
         if (!isVisible(el) || el === triggerEl || triggerEl.contains(el)) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width < 36 || r.width > 260 || r.height < 18 || r.height > 54) return false;
         const t = normalizeText(el.innerText || el.textContent);
         return optRe.test(t);
       });
       if (opts.length > 0) {
-        opts[opts.length - 1].click();
+        opts.sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
+        dispatchRealClick(opts[0]);
         if (!silent) showToast(`已将当前页切换为每页 ${sizeNum} 条 ✓`, 2600);
         setTimeout(() => {
           if (config.enabled) evaluateNow();
           if (typeof onComplete === "function") onComplete(true);
         }, 1200);
+      } else if (attempt < 2) {
+        if (attempt === 0) dispatchRealClick(triggerEl);
+        setTimeout(() => findOptionAndClick(attempt + 1), 280);
       } else {
-        // 点空白处收回下拉，避免遮挡页面
         document.body.click();
         if (!silent) showToast(`未找到「${sizeNum} 条/页」选项，可手动切换或在面板改选 50 条`, 3200);
         if (typeof onComplete === "function") setTimeout(() => onComplete(false), 200);
       }
-    }, 240);
+    };
+
+    setTimeout(() => findOptionAndClick(0), 260);
     return true;
   }
 
@@ -5435,42 +5546,75 @@
     requestAnimationFrame(clampHostIntoViewport);
   }
 
+  let pillWasDragged = false;
+
   function enablePanelDragging() {
     const header = $("panelHeader");
-    if (!header) return;
+    const pill = $("pillBtn");
+    if (!header && !pill) return;
     let dragging = false;
+    let dragSource = null;
+    let moved = false;
     let startX = 0;
     let startY = 0;
     let origLeft = 0;
     let origTop = 0;
 
-    header.addEventListener("mousedown", (e) => {
-      if (e.target.closest?.("button")) return;
+    const beginDrag = (e, source) => {
+      if (e.button !== 0) return;
+      if (source === "header" && e.target.closest?.("button")) return;
       dragging = true;
+      dragSource = source;
+      moved = false;
       const rect = host.getBoundingClientRect();
       origLeft = rect.left;
       origTop = rect.top;
       startX = e.clientX;
       startY = e.clientY;
       host.style.right = "auto";
+      host.style.bottom = "auto";
       host.style.left = `${origLeft}px`;
       host.style.top = `${origTop}px`;
+      if (source === "pill" && pill) pill.style.cursor = "grabbing";
       e.preventDefault();
-    });
+    };
+
+    if (header) header.addEventListener("mousedown", (e) => beginDrag(e, "header"));
+    if (pill) pill.addEventListener("mousedown", (e) => beginDrag(e, "pill"));
 
     window.addEventListener("mousemove", (e) => {
       if (!dragging) return;
-      const panelWidth = host.offsetWidth || 382;
-      const maxLeft = Math.max(8, window.innerWidth - panelWidth - 8);
-      const maxTop = Math.max(8, window.innerHeight - 60);
-      const nextLeft = Math.min(maxLeft, Math.max(8, origLeft + (e.clientX - startX)));
-      const nextTop = Math.min(maxTop, Math.max(8, origTop + (e.clientY - startY)));
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (!moved && Math.hypot(dx, dy) >= 4) {
+        moved = true;
+      }
+      if (!moved) return;
+      const rect = host.getBoundingClientRect();
+      const boxW = rect.width || host.offsetWidth || 180;
+      const boxH = rect.height || host.offsetHeight || 44;
+      const maxLeft = Math.max(8, window.innerWidth - boxW - 8);
+      const maxTop = Math.max(8, window.innerHeight - Math.min(boxH, 60) - 8);
+      const nextLeft = Math.min(maxLeft, Math.max(8, origLeft + dx));
+      const nextTop = Math.min(maxTop, Math.max(8, origTop + dy));
       host.style.left = `${nextLeft}px`;
       host.style.top = `${nextTop}px`;
     });
 
     window.addEventListener("mouseup", () => {
+      if (!dragging) return;
+      if (dragSource === "pill") {
+        if (pill) pill.style.cursor = "grab";
+        if (moved) {
+          pillWasDragged = true;
+          setTimeout(() => {
+            pillWasDragged = false;
+          }, 80);
+        }
+      }
       dragging = false;
+      dragSource = null;
+      moved = false;
     });
   }
 
@@ -5719,12 +5863,18 @@
   }
 
   function saveConfig() {
-    if (!isConfigHydrated || !isExtensionAlive()) return;
+    if (!isConfigHydrated) return;
     // 仅持久化监控与 UI 配置，不覆盖独立的 CHANNELS_STORAGE_KEY，杜绝多标签页互相冲掉推送 Token 与 AI Key
-    const nonChannelConfig = { ...config };
+    const nonChannelConfig = { ...config, configUpdatedAt: Date.now() };
     for (const f of [...CHANNEL_STRING_FIELDS, ...AI_STRING_FIELDS, ...CHANNEL_BOOL_FIELDS, "pushDirection", "channelHistory"]) {
       delete nonChannelConfig[f];
     }
+    try {
+      window.localStorage.setItem(CONFIG_BACKUP_KEY, JSON.stringify(nonChannelConfig));
+    } catch {
+      // 忽略本地备份异常
+    }
+    if (!isExtensionAlive()) return;
     try {
       chrome.storage.local.set({ [STORAGE_KEY]: nonChannelConfig });
     } catch {
@@ -5827,7 +5977,10 @@
   function bindEvents() {
     enablePanelDragging();
     window.addEventListener("resize", clampHostIntoViewport);
-    $("pillBtn").addEventListener("click", () => setPanelOpen(true));
+    $("pillBtn").addEventListener("click", () => {
+      if (pillWasDragged) return;
+      setPanelOpen(true);
+    });
     $("collapseBtn").addEventListener("click", () => setPanelOpen(false));
 
     // 所有大区块均支持独立点击标题栏折叠 / 展开（自动持久化记忆）
@@ -6180,21 +6333,29 @@
       refreshAbnormalView(allAbnormalItems);
     });
 
-    $("closeUpdateBannerBtn")?.addEventListener("click", () => {
-      $("updateBanner")?.classList.remove("show");
-    });
+    let latestUpdateInfo = null;
 
-    $("checkUpdateBtn")?.addEventListener("click", async (e) => {
-      e.stopPropagation();
+    function setUpdateButtonLit(hasUpdate, versionStr) {
+      const btn = $("checkUpdateBtn");
+      if (!btn) return;
+      btn.classList.toggle("has-update", Boolean(hasUpdate));
+      btn.textContent = hasUpdate ? "有新版" : "更新";
+      btn.title = hasUpdate
+        ? `发现新版本 v${versionStr}，点击查看或忽略`
+        : "检查官网 kamisama.si 是否有新版本可更新";
+    }
+
+    async function runUpdateCheck(isSilent) {
       const btn = $("checkUpdateBtn");
       const banner = $("updateBanner");
       const textEl = $("updateBannerText");
       const linkEl = $("updateDownloadLink");
+      const ignoreBtn = $("ignoreUpdateBtn");
       if (!isExtensionAlive()) {
-        showToast("插件已刷新，请先按 F5 刷新当前页面后再检查更新", 3200);
+        if (!isSilent) showToast("插件已刷新，请先按 F5 刷新当前页面后再检查更新", 3200);
         return;
       }
-      if (btn) btn.textContent = "检查中...";
+      if (!isSilent && btn) btn.textContent = "检查中...";
       const res = await new Promise((resolve) => {
         try {
           chrome.runtime.sendMessage({ type: "CHECK_EXTENSION_UPDATE" }, (r) =>
@@ -6204,34 +6365,68 @@
           resolve({ ok: false, error: String(err) });
         }
       });
-      if (btn) btn.textContent = "更新";
       if (!res || !res.ok) {
-        if (banner && textEl && linkEl) {
-          textEl.textContent = "暂时连不上官网，可点右侧直接访问 kamisama.si 获取最新版";
-          linkEl.href = "https://www.kamisama.si";
-          linkEl.textContent = "打开官网";
-          banner.classList.add("show");
+        if (!isSilent) {
+          setUpdateButtonLit(false, "");
+          if (banner && textEl && linkEl) {
+            textEl.textContent = "暂时连不上官网，可点右侧直接访问 kamisama.si 获取最新版";
+            linkEl.href = "https://www.kamisama.si";
+            linkEl.textContent = "打开官网";
+            if (ignoreBtn) ignoreBtn.style.display = "none";
+            banner.classList.add("show");
+          }
         }
         return;
       }
+      latestUpdateInfo = res;
+      const isIgnored = Boolean(config.ignoredUpdateVersion && config.ignoredUpdateVersion === res.latestVersion);
       if (res.hasUpdate) {
-        if (banner && textEl && linkEl) {
+        setUpdateButtonLit(!isIgnored, res.latestVersion);
+        if (!isSilent && banner && textEl && linkEl) {
           const notePart = res.notes ? `（${res.notes.slice(0, 36)}）` : "";
-          textEl.textContent = `🎉 发现新版本 v${res.latestVersion}（当前 v${res.currentVersion}）${notePart}：下载解压覆盖原目录，再去扩展中心点刷新即可`;
+          textEl.textContent = `🎉 发现新版本 v${res.latestVersion}（当前 v${res.currentVersion}）${notePart}：覆盖原目录并重载即可，全部配置自动保留`;
           linkEl.href = res.downloadUrl || res.pageUrl;
           linkEl.textContent = `下载 v${res.latestVersion}`;
+          if (ignoreBtn) ignoreBtn.style.display = "inline-block";
           banner.classList.add("show");
         }
       } else {
-        showToast(`当前已是最新版 v${res.currentVersion} ✓`, 3000);
-        if (banner && textEl && linkEl) {
-          textEl.textContent = `当前已是最新版 v${res.currentVersion} ✓（官网最新 v${res.latestVersion}）`;
-          linkEl.href = res.pageUrl || "https://www.kamisama.si";
-          linkEl.textContent = "去官网看看";
-          banner.classList.add("show");
+        setUpdateButtonLit(false, "");
+        if (!isSilent) {
+          showToast(`当前已是最新版 v${res.currentVersion} ✓`, 3000);
+          if (banner && textEl && linkEl) {
+            textEl.textContent = `当前已是最新版 v${res.currentVersion} ✓（官网最新 v${res.latestVersion}）`;
+            linkEl.href = res.pageUrl || "https://www.kamisama.si";
+            linkEl.textContent = "去官网看看";
+            if (ignoreBtn) ignoreBtn.style.display = "none";
+            banner.classList.add("show");
+          }
         }
       }
+    }
+
+    $("closeUpdateBannerBtn")?.addEventListener("click", () => {
+      $("updateBanner")?.classList.remove("show");
     });
+
+    $("ignoreUpdateBtn")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (latestUpdateInfo?.latestVersion) {
+        config.ignoredUpdateVersion = latestUpdateInfo.latestVersion;
+        saveConfig();
+        setUpdateButtonLit(false, "");
+        $("updateBanner")?.classList.remove("show");
+        showToast(`已忽略 v${latestUpdateInfo.latestVersion} 更新提醒（后续有更新版本再提醒）`, 3200);
+      }
+    });
+
+    $("checkUpdateBtn")?.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      await runUpdateCheck(false);
+    });
+
+    // 启动后 2.5 秒静默检查一次新版本，有新版自动点亮顶部「有新版」提示（已忽略版本不亮）
+    setTimeout(() => runUpdateCheck(true), 2500);
 
     // 5 大推送渠道文本字段：监听 input / change / blur，实时写入三层持久化存储并记住历史记录
     CHANNEL_STRING_FIELDS.forEach((key) => {
@@ -6396,15 +6591,27 @@
       backupChannels = null;
     }
 
-    const legacyCfg = localRes?.[STORAGE_KEY] || null;
+    let backupConfig = null;
+    try {
+      const rawCfgBackup = window.localStorage.getItem(CONFIG_BACKUP_KEY);
+      if (rawCfgBackup) backupConfig = JSON.parse(rawCfgBackup);
+    } catch {
+      backupConfig = null;
+    }
+
+    const legacyCfg = localRes?.[STORAGE_KEY] || backupConfig || null;
     if (legacyCfg) {
       config = {
         ...config,
-        ...legacyCfg,
+        ...(backupConfig && typeof backupConfig === "object" ? backupConfig : {}),
+        ...(localRes?.[STORAGE_KEY] && typeof localRes[STORAGE_KEY] === "object" ? localRes[STORAGE_KEY] : {}),
         collapsedSections: {
           ...DEFAULT_CONFIG.collapsedSections,
-          ...(legacyCfg.collapsedSections && typeof legacyCfg.collapsedSections === "object"
-            ? legacyCfg.collapsedSections
+          ...(backupConfig?.collapsedSections && typeof backupConfig.collapsedSections === "object"
+            ? backupConfig.collapsedSections
+            : {}),
+          ...(localRes?.[STORAGE_KEY]?.collapsedSections && typeof localRes[STORAGE_KEY].collapsedSections === "object"
+            ? localRes[STORAGE_KEY].collapsedSections
             : {}),
         },
       };

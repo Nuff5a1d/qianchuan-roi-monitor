@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kamisama - 全链路千川",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "description": "Kamisama - 全链路千川：支持千川乘方/调控/全域推商品/推直播间 ROI、预算提醒、可用余额充值提醒、灰保过保监控，内置30分钟趋势总结报告（支持豆包/智谱/DeepSeek/通义AI分析）与五大渠道三层持久化推送。",
   "permissions": [
     "storage",
